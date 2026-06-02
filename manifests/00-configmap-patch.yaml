@@ -1,0 +1,12 @@
+apiVersion: v1
+data:
+  debug_print.patch: "Index: amdgpu-6.16.13-2278356.24.04/amd/amdgpu/amdgpu_drv.c\n===================================================================\n---
+    amdgpu-6.16.13-2278356.24.04.orig/amd/amdgpu/amdgpu_drv.c\n+++ amdgpu-6.16.13-2278356.24.04/amd/amdgpu/amdgpu_drv.c\n@@
+    -3308,6 +3308,8 @@ static int __init amdgpu_init(void)\n \tif (r)\n \t\tgoto error_fence;\n\n+\tDRM_INFO(\"Running
+    patched amdgpu driver.\\n\");\n+\n \tDRM_INFO(\"amdgpu kernel modesetting enabled.\\n\");\n\n
+    \tDRM_INFO(\"amdgpu version: %s\\n\", AMDGPU_VERSION);\n"
+kind: ConfigMap
+metadata:
+  creationTimestamp: null
+  name: amdgpu-patch-files
+  namespace: kube-system

@@ -1,0 +1,32 @@
+# NodeReadinessRule — gates AMD GPU nodes until the amdgpu driver patch is
+# verified after reboot. Conforms to the cluster's discovered schema:
+#   API: readiness.node.x-k8s.io/v1alpha1  (NRC on DOKS 1.36.0)
+#   spec.conditions[], spec.taint{key,value,effect}, spec.nodeSelector,
+#   spec.enforcementMode {bootstrap-only|continuous}, spec.dryRun
+#
+# NOTE on the taint key: the CRD enforces `prefix/name` with prefix EXACTLY
+# 'readiness.k8s.io' and name a single qualified-name segment (one slash only).
+# The prompt's proposed `readiness.k8s.io/amd.com/gpu-driver-not-ready` has two
+# slashes and is REJECTED by the schema, so we use a single-segment name.
+#
+# IMMUTABILITY: spec.conditions, spec.nodeSelector and spec.enforcementMode are
+# immutable. spec.dryRun is mutable. This file ships dryRun:true for the Phase 0
+# blast-radius preview; Phase 2 flips it to false in place (patch) rather than
+# delete/recreate, keeping the immutable fields stable.
+apiVersion: readiness.node.x-k8s.io/v1alpha1
+kind: NodeReadinessRule
+metadata:
+  name: amdgpu-driver-patched
+spec:
+  enforcementMode: bootstrap-only        # taint once at join, remove when met, then ignore
+  dryRun: true                           # Phase 0 preview; flipped to false in Phase 2
+  nodeSelector:
+    matchLabels:
+      doks.digitalocean.com/gpu-brand: amd
+  conditions:
+    - type: AMDGPUDriverPatched
+      requiredStatus: "True"
+  taint:
+    key: readiness.k8s.io/amd-gpu-driver-not-ready
+    value: "true"
+    effect: NoSchedule

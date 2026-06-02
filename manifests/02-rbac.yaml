@@ -1,0 +1,36 @@
+# ServiceAccount + cluster-wide RBAC for the set-condition init container.
+# Pod-level identity (shared by all containers in the pod, per prompt). Grants
+# only what init 2 needs: read nodes, patch/update nodes/status cluster-wide.
+# Not restricted per-node (a node patches itself by NODE_NAME at runtime).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: amdgpu-driver-patch
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: amdgpu-driver-patch
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get"]
+  # get is required because `kubectl patch --subresource=status` issues a GET on
+  # nodes/status before the PATCH; patch/update perform the condition write.
+  - apiGroups: [""]
+    resources: ["nodes/status"]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: amdgpu-driver-patch
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: amdgpu-driver-patch
+subjects:
+  - kind: ServiceAccount
+    name: amdgpu-driver-patch
+    namespace: kube-system

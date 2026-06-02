@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# =============================================================================
+# init container 1: driver-patch  (PRIVILEGED, hostPID)
+# -----------------------------------------------------------------------------
+# Applies the amdgpu DKMS debug_print patch, rebuilds the module + initramfs,
+# and reboots the node. Runs ALL host mutations inside the host namespaces via
+# `nsenter -t 1 ...` (host PID 1).
+#
+# Exit-code contract (see prompt "Hard requirements" 3 & 4):
+#   * Exit 0   -> ONLY when post-reboot dmesg shows the patched-driver line.
+#                 This is the only path that lets init 2 run + set the condition.
+#   * Reboot   -> the deliberate mid-flow step. The node goes down, the pod is
+#                 killed, and the kubelet restarts the init sequence from the top
+#                 after boot. We never exit 0 on this path: we trigger reboot and
+#                 then `sleep infinity` (the node going down ends the process; no
+#                 fail-closed timeout, so a slow-but-legitimate reboot never
+#                 produces a spurious crash).
+#   * Exit !=0 -> version/path mismatch, dkms failure, patch-not-applied, or any
+#                 unexpected error. The pod shows Init:CrashLoopBackOff; the node
+#                 stays gated for human review. init 2 never runs.
+#
+# State machine (re-entrant across the reboot, evaluated top-to-bottom):
+#   a. dmesg already shows the signal            -> verified, exit 0
+#   b. marker present but signal absent          -> built AND rebooted, still no
+#                                                   signal = genuine failure, crash
+#   c. otherwise                                 -> full patch procedure, reboot
+# =============================================================================
+set -uo pipefail
+
+VER="6.16.13-2278356.24.04"
+SRC="/usr/src/amdgpu-${VER}"
+DKMS_CONF="${SRC}/dkms.conf"
+PATCH_NAME="debug_print.patch"
+PATCH_SRC="/config/${PATCH_NAME}"          # ConfigMap mount (container fs)
+PATCH_DST="${SRC}/patches/${PATCH_NAME}"   # host fs
+MARKER_DIR="/var/lib/amdgpu-patch"
+MARKER="${MARKER_DIR}/applied"             # host root fs, PERSISTS across reboot
+SIGNAL="Running patched amdgpu driver."
+
+log()  { echo "[init1 $(date -u +%FT%TZ)] $*"; }
+die()  { log "FATAL: $*"; exit 1; }
+
+# Run a shell command string inside the host namespaces (host PID 1).
+hsh()  { nsenter -t 1 -m -u -i -n -p -- bash -c "$1"; }
+
+log "amdgpu driver-patch init starting (target version ${VER})."
+
+# ---------------------------------------------------------------------------
+# (a) Already verified? The post-reboot success branch.
+# ---------------------------------------------------------------------------
+if hsh "dmesg 2>/dev/null | grep -qiF '${SIGNAL}'"; then
+  log "dmesg shows '${SIGNAL}'. Patched driver verified. Exiting 0 (init 2 may run)."
+  exit 0
+fi
+log "dmesg does NOT yet show the patched-driver line."
+
+# ---------------------------------------------------------------------------
+# Version / path gate (mandatory, before any mutation). Mismatch => crash.
+# ---------------------------------------------------------------------------
+if ! hsh "dkms status 2>/dev/null | grep -q '^amdgpu/${VER},'"; then
+  log "---- dkms status ----"; hsh "dkms status 2>&1" || true
+  die "version gate: 'amdgpu/${VER}' not found in dkms status. Refusing to patch."
+fi
+hsh "test -f '${DKMS_CONF}'" || die "version gate: ${DKMS_CONF} missing. Refusing to patch."
+hsh "test -f '${SRC}/amd/amdgpu/amdgpu_drv.c'" || die "version gate: patch target ${SRC}/amd/amdgpu/amdgpu_drv.c missing."
+log "Version gate passed: amdgpu/${VER} present and source tree intact."
+
+# ---------------------------------------------------------------------------
+# (b) Marker present but signal absent. The marker persists across reboot, so
+#     this means we ALREADY built the patched module AND rebooted, yet dmesg
+#     still does not show the signal (module failed to load, wrong kernel, or an
+#     ineffective patch). That is a genuine failure: crash loudly for human
+#     review (Init:CrashLoopBackOff). Do NOT reboot, do NOT re-run dkms -- that
+#     would be a silent reboot loop, the opposite of the design's intent.
+# ---------------------------------------------------------------------------
+if hsh "test -f '${MARKER}'"; then
+  log "Marker ${MARKER} present but signal absent -> built AND rebooted, still no signal."
+  log "---- dmesg | grep -i amdgpu ----"; hsh "dmesg 2>/dev/null | grep -i amdgpu" || true
+  die "patched module built and node rebooted, but '${SIGNAL}' is still absent from dmesg. Crashing for human review (no reboot, no dkms re-run)."
+fi
+
+# ---------------------------------------------------------------------------
+# (c) Full patch procedure (fresh node): write patch, edit dkms.conf, rebuild,
+#     update initramfs, mark, reboot. Any failure => crash (exit non-zero).
+# ---------------------------------------------------------------------------
+log "Fresh node: running full patch procedure."
+
+# 1. Deliver the patch to the host source tree.
+hsh "mkdir -p '${SRC}/patches'" || die "could not create ${SRC}/patches"
+[ -f "${PATCH_SRC}" ] || die "ConfigMap patch ${PATCH_SRC} not mounted in container."
+# cat reads the ConfigMap from the CONTAINER fs; tee writes it on the HOST fs.
+cat "${PATCH_SRC}" | nsenter -t 1 -m -- tee "${PATCH_DST}" >/dev/null \
+  || die "failed writing patch to host ${PATCH_DST}"
+log "Wrote patch to host ${PATCH_DST}:"
+hsh "cat '${PATCH_DST}'" || true
+
+# 2. Register the patch in dkms.conf (idempotent grep-guarded append).
+if hsh "grep -qF 'PATCH[0]=${PATCH_NAME}' '${DKMS_CONF}'"; then
+  log "dkms.conf already references PATCH[0]=${PATCH_NAME} (idempotent skip)."
+else
+  hsh "printf 'PATCH[0]=%s\n' '${PATCH_NAME}' >> '${DKMS_CONF}'" \
+    || die "failed appending PATCH[0] to ${DKMS_CONF}"
+  log "Appended PATCH[0]=${PATCH_NAME} to ${DKMS_CONF}."
+fi
+
+# 3. Rebuild the module. remove (best-effort) then install; capture install log
+#    and require the patch-application line to prove the patch took.
+log "dkms remove amdgpu/${VER} --all (best-effort)..."
+hsh "dkms remove amdgpu/${VER} --all 2>&1" || log "dkms remove returned non-zero (continuing; module may already be absent)."
+
+log "dkms install amdgpu/${VER} ..."
+INSTALL_OUT="$(hsh "dkms install amdgpu/${VER} 2>&1")"; RC=$?
+echo "---- dkms install output ----"
+echo "${INSTALL_OUT}"
+echo "-----------------------------"
+[ "${RC}" -eq 0 ] || die "dkms install failed (rc=${RC})."
+# dkms 3.2.2 prints "Applying patch debug_print.patch... done." (older dkms also
+# printed a per-file "patching file ..." line; do NOT depend on that obsolete
+# format). Confirm dkms applied the patch and reported no patch failure.
+echo "${INSTALL_OUT}" | grep -qiF "applying patch ${PATCH_NAME}" \
+  || die "patch-not-applied: dkms output lacks 'Applying patch ${PATCH_NAME}'."
+if echo "${INSTALL_OUT}" | grep -qiE "(patch.*${PATCH_NAME}.*fail|fail.*${PATCH_NAME})"; then
+  die "patch failed: dkms reported a patch failure for ${PATCH_NAME}."
+fi
+# Definitive, cleanup-proof proof: the compiled+installed module that will load
+# on next boot must contain the embedded signal string. (dkms 3.2.2 removes the
+# build/ tree after install, so inspecting the build source is unreliable; we
+# inspect the installed .ko instead, decompressing whatever form it takes.)
+KREL="$(hsh 'uname -r')"
+[ -n "${KREL}" ] || die "could not determine host kernel release."
+if ! hsh "
+  shopt -s nullglob
+  rc=1
+  for f in /lib/modules/${KREL}/updates/dkms/amdgpu.ko*; do
+    case \"\$f\" in
+      *.xz)  xz   -dc \"\$f\" 2>/dev/null ;;
+      *.zst) zstd -dc \"\$f\" 2>/dev/null ;;
+      *.gz)  gzip -dc \"\$f\" 2>/dev/null ;;
+      *)     cat       \"\$f\" 2>/dev/null ;;
+    esac | strings | grep -qF '${SIGNAL}' && { rc=0; break; }
+  done
+  exit \$rc
+"; then
+  die "patch-not-applied: '${SIGNAL}' not embedded in installed amdgpu module for kernel ${KREL}."
+fi
+log "Patch confirmed: dkms applied it and '${SIGNAL}' is embedded in the installed module."
+
+# 4. Rebuild initramfs for all kernels.
+log "update-initramfs -u -k all ..."
+hsh "update-initramfs -u -k all 2>&1" || die "update-initramfs failed."
+
+# 5. Drop the marker (so a pod kill between here and the reboot lands in branch b).
+hsh "mkdir -p '${MARKER_DIR}' && touch '${MARKER}'" || die "failed writing marker ${MARKER}."
+log "Marker ${MARKER} written."
+
+# 6. Reboot. The node goes down, the pod is killed, init re-runs after boot.
+log "Triggering host reboot to load the patched driver."
+hsh "reboot" || die "reboot command failed"
+log "Reboot triggered; sleeping until the node goes down. Will NOT exit 0 here."
+# sleep infinity (not a bounded timeout): the node going down ends this process.
+# A bounded sleep+die would turn a legitimately slow GPU-node reboot into a
+# spurious crash, violating "crash == needs review".
+sleep infinity

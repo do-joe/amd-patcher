@@ -1,0 +1,13 @@
+Index: amdgpu-6.16.13-2278356.24.04/amd/amdgpu/amdgpu_drv.c
+===================================================================
+--- amdgpu-6.16.13-2278356.24.04.orig/amd/amdgpu/amdgpu_drv.c
++++ amdgpu-6.16.13-2278356.24.04/amd/amdgpu/amdgpu_drv.c
+@@ -3308,6 +3308,8 @@ static int __init amdgpu_init(void)
+ 	if (r)
+ 		goto error_fence;
+
++	DRM_INFO("Running patched amdgpu driver.\n");
++
+ 	DRM_INFO("amdgpu kernel modesetting enabled.\n");
+
+ 	DRM_INFO("amdgpu version: %s\n", AMDGPU_VERSION);
