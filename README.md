@@ -44,6 +44,17 @@ schedule only onto patched nodes.
   - [`10-sample-deployment.yaml`](https://github.com/do-joe/amd-patcher/blob/main/manifests/label/10-sample-deployment.yaml)
 - **NRC variant (for clusters with a Node Readiness Controller)** — [`manifests/nrc/`](https://github.com/do-joe/amd-patcher/tree/main/manifests/nrc)
 
+### Download the manifests (no clone needed)
+
+You don't need to clone this repo. Right‑click → **Save link as…** to download each
+file, or `kubectl apply -f <url>` directly (this repo is public):
+
+| Manifest | Download (raw) |
+|----------|----------------|
+| RBAC (ServiceAccount + ClusterRole) | [`02-rbac.yaml`](https://raw.githubusercontent.com/do-joe/amd-patcher/main/manifests/label/02-rbac.yaml) |
+| DaemonSet (the patcher) | [`03-daemonset.yaml`](https://raw.githubusercontent.com/do-joe/amd-patcher/main/manifests/label/03-daemonset.yaml) |
+| Sample GPU deployment | [`10-sample-deployment.yaml`](https://raw.githubusercontent.com/do-joe/amd-patcher/main/manifests/label/10-sample-deployment.yaml) |
+
 ---
 
 ## 2. What has already been done
@@ -167,12 +178,16 @@ Because of this:
      --docker-email=<email>
    ```
 
-2. **RBAC + DaemonSet** (this is the step that reboots the nodes):
+2. **RBAC + DaemonSet** (this is the step that reboots the nodes). Apply the two
+   manifests straight from their raw URLs — no clone required:
 
    ```bash
-   kubectl apply -f manifests/label/02-rbac.yaml \
-                 -f manifests/label/03-daemonset.yaml
+   kubectl apply -f https://raw.githubusercontent.com/do-joe/amd-patcher/main/manifests/label/02-rbac.yaml \
+                 -f https://raw.githubusercontent.com/do-joe/amd-patcher/main/manifests/label/03-daemonset.yaml
    ```
+
+   (Or download them first via the [Download the manifests](#download-the-manifests-no-clone-needed)
+   links and `kubectl apply -f ./02-rbac.yaml -f ./03-daemonset.yaml`.)
 
 3. **Watch the patch + reboot cycle:**
 
@@ -191,7 +206,7 @@ Because of this:
 5. **(Optional) Prove a real GPU binds** with the sample workload:
 
    ```bash
-   kubectl apply -f manifests/label/10-sample-deployment.yaml
+   kubectl apply -f https://raw.githubusercontent.com/do-joe/amd-patcher/main/manifests/label/10-sample-deployment.yaml
    kubectl get pods -o wide    # Running on a patched node, holding amd.com/gpu: 1
    ```
 
