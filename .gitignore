@@ -1,0 +1,9 @@
+# The 4.3 MB pre-compiled driver payload ships baked into the container image,
+# never committed (public repo, and it exceeds GitHub's recommended blob size).
+patch/dkms_patch.tar.gz
+
+# Manual-test scratch artifact (device-plugin pause snippet).
+temp.txt
+
+# GHCR pull secret manifest — embeds the registry token; never commit.
+ghcr-pull-secret.yaml

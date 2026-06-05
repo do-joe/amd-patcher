@@ -1,0 +1,38 @@
+# Sample GPU workload — LABEL variant.
+# Schedules ONLY onto nodes the patcher has labeled, AND binds a real GPU.
+#   * nodeSelector amd.com/gpu-driver-patched=true  -> only patched nodes.
+#   * tolerations amd.com/gpu                        -> tolerate the device taint.
+#   * resources.limits amd.com/gpu: 1                -> forces scheduling through
+#       the amd-gpu-device-plugin. A Running pod therefore proves the node is
+#       labeled AND the patched driver + device plugin expose a healthy GPU —
+#       not merely that scheduling succeeded.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gpu-sample
+  namespace: default
+  labels:
+    app: gpu-sample
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gpu-sample
+  template:
+    metadata:
+      labels:
+        app: gpu-sample
+    spec:
+      nodeSelector:
+        amd.com/gpu-driver-patched: "true"
+      tolerations:
+        - key: amd.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: gpu-sample
+          image: busybox:1.36
+          command: ["sleep", "infinity"]
+          resources:
+            limits:
+              amd.com/gpu: 1

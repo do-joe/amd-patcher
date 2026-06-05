@@ -1,0 +1,95 @@
+# DaemonSet: amdgpu-driver-patch  — LABEL variant (no NRC)
+# Pod = two run-to-completion init containers + an idle busybox "pause" main.
+#   init 1 "driver-patch"  (PRIVILEGED, hostPID): extract pre-compiled modules +
+#                          sha256 verify + depmod + initramfs + reboot, re-entrant
+#                          reboot-loop; exits 0 only after post-reboot verify.
+#   init 2 "label-node"    (UNPRIVILEGED): host kubectl + pod SA token labels the
+#                          node amd.com/gpu-driver-patched=true. Runs only if
+#                          init 1 exits 0.
+#   main "pause"           (UNPRIVILEGED): sleep infinity so the pod stays Running.
+#
+# The patch payload + both scripts are baked into the image; the only host mount
+# is the host kubectl binary for init 2. The image is private GHCR, pulled via
+# the imperatively-created `ghcr-pull` secret.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: amdgpu-driver-patch
+  namespace: kube-system
+  labels:
+    app: amdgpu-driver-patch
+spec:
+  selector:
+    matchLabels:
+      app: amdgpu-driver-patch
+  template:
+    metadata:
+      labels:
+        app: amdgpu-driver-patch
+    spec:
+      serviceAccountName: amdgpu-driver-patch
+      # init 1 reaches host PID 1 via nsenter; hostPID is a pod-level field.
+      hostPID: true
+      nodeSelector:
+        doks.digitalocean.com/gpu-brand: amd
+      imagePullSecrets:
+        - name: ghcr-pull
+      tolerations:
+        # device taint on every AMD GPU node
+        - key: amd.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      volumes:
+        # Host kubectl binary, mounted read-only so init 2 execs it directly
+        # (no nsenter) while staying unprivileged. /usr/bin/kubectl on this image.
+        - name: host-kubectl
+          hostPath:
+            path: /usr/bin/kubectl
+            type: File
+      initContainers:
+        # ---- init 1: PRIVILEGED driver patch + reboot loop ----
+        - name: driver-patch
+          image: ghcr.io/do-solutions/amdgpu-driver-patch:6.12.74-deb13-1-amd64
+          command: ["bash", "/opt/amdgpu-patch/scripts/init1-driver-patch.sh"]
+          securityContext:
+            privileged: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+        # ---- init 2: UNPRIVILEGED label node ----
+        - name: label-node
+          image: ghcr.io/do-solutions/amdgpu-driver-patch:6.12.74-deb13-1-amd64
+          command: ["bash", "/opt/amdgpu-patch/scripts/init2-label-node.sh"]
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: host-kubectl
+              mountPath: /host/usr/bin/kubectl
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+      # ---- main: UNPRIVILEGED idle pause ----
+      containers:
+        - name: pause
+          image: busybox:1.36
+          command: ["sleep", "infinity"]
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi

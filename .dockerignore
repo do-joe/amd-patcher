@@ -1,0 +1,11 @@
+# Build context = the baked payload + the init scripts, nothing else.
+# We keep:  patch/dkms_patch.tar.gz  and  scripts/
+# Everything below is excluded from the image build context.
+.git
+.gitignore
+.dockerignore
+Dockerfile
+manifests/
+temp.txt
+patch/debug_print.patch
+patch/apply-patch.txt
