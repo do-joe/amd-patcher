@@ -1,10 +1,19 @@
-# DaemonSet: amdgpu-driver-patch
+# DaemonSet: amdgpu-driver-patch  — NRC variant (for clusters WITH a Node
+# Readiness Controller). Kept for future reuse alongside the primary label/
+# variant; both share the same image.
 # Pod = two run-to-completion init containers + an idle busybox "pause" main.
-#   init 1 "driver-patch"  (PRIVILEGED, hostPID): patch + dkms + initramfs + reboot,
-#                          re-entrant reboot-loop; exits 0 only after dmesg verify.
-#   init 2 "set-condition" (UNPRIVILEGED): host kubectl + pod SA token sets
-#                          AMDGPUDriverPatched=True. Runs only if init 1 exits 0.
+#   init 1 "driver-patch"  (PRIVILEGED, hostPID): extract pre-compiled modules +
+#                          sha256 verify + depmod + initramfs + reboot, re-entrant
+#                          reboot-loop; exits 0 only after post-reboot verify.
+#   init 2 "set-condition" (UNPRIVILEGED): host kubectl + pod SA token sets the
+#                          node condition AMDGPUDriverPatched=True, which NRC
+#                          watches to remove the readiness taint. Runs only if
+#                          init 1 exits 0.
 #   main "pause"           (UNPRIVILEGED): sleep infinity so the pod stays Running.
+#
+# The patch payload + both scripts are baked into the image; the only host mount
+# is the host kubectl binary for init 2. The image is private GHCR, pulled via
+# the imperatively-created `ghcr-pull` secret.
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -26,6 +35,8 @@ spec:
       hostPID: true
       nodeSelector:
         doks.digitalocean.com/gpu-brand: amd
+      imagePullSecrets:
+        - name: ghcr-pull
       tolerations:
         # device taint on every AMD GPU node
         - key: amd.com/gpu
@@ -36,13 +47,6 @@ spec:
           operator: Exists
           effect: NoSchedule
       volumes:
-        - name: patch
-          configMap:
-            name: amdgpu-patch-files
-        - name: scripts
-          configMap:
-            name: amdgpu-patch-scripts
-            defaultMode: 0755
         # Host kubectl binary, mounted read-only so init 2 execs it directly
         # (no nsenter) while staying unprivileged. /usr/bin/kubectl on this image.
         - name: host-kubectl
@@ -52,25 +56,18 @@ spec:
       initContainers:
         # ---- init 1: PRIVILEGED driver patch + reboot loop ----
         - name: driver-patch
-          image: debian:stable-slim
-          command: ["bash", "/scripts/init1-driver-patch.sh"]
+          image: ghcr.io/do-solutions/amdgpu-driver-patch:6.12.74-deb13-1-amd64
+          command: ["bash", "/opt/amdgpu-patch/scripts/init1-driver-patch.sh"]
           securityContext:
             privileged: true
-          volumeMounts:
-            - name: scripts
-              mountPath: /scripts
-              readOnly: true
-            - name: patch
-              mountPath: /config
-              readOnly: true
           resources:
             requests:
               cpu: 50m
               memory: 64Mi
         # ---- init 2: UNPRIVILEGED set node condition ----
         - name: set-condition
-          image: debian:stable-slim
-          command: ["bash", "/scripts/init2-set-condition.sh"]
+          image: ghcr.io/do-solutions/amdgpu-driver-patch:6.12.74-deb13-1-amd64
+          command: ["bash", "/opt/amdgpu-patch/scripts/init2-set-condition.sh"]
           securityContext:
             privileged: false
             allowPrivilegeEscalation: false
@@ -82,9 +79,6 @@ spec:
                 fieldRef:
                   fieldPath: spec.nodeName
           volumeMounts:
-            - name: scripts
-              mountPath: /scripts
-              readOnly: true
             - name: host-kubectl
               mountPath: /host/usr/bin/kubectl
               readOnly: true

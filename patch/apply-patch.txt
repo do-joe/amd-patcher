@@ -1,0 +1,17 @@
+#apply patch to dkms
+    cd /
+    tar -xvzf dkms_patch.tar.gz  
+#varify file sizes
+    ls -l /lib/modules/6.12.74+deb13+1-amd64/updates/dkms/amd* 
+# you should see the following
+    -rw-r--r-- 1 root root   26472 Jun  2 01:00 /lib/modules/6.12.74+deb13+1-amd64/updates/dkms/amd-sched.ko.xz
+    -rw-r--r-- 1 root root    9892 Jun  2 01:00 /lib/modules/6.12.74+deb13+1-amd64/updates/dkms/amddrm_buddy.ko.xz
+    -rw-r--r-- 1 root root    5404 Jun  2 01:00 /lib/modules/6.12.74+deb13+1-amd64/updates/dkms/amddrm_exec.ko.xz
+    -rw-r--r-- 1 root root    7956 Jun  2 01:00 /lib/modules/6.12.74+deb13+1-amd64/updates/dkms/amddrm_ttm_helper.ko.xz
+    -rw-r--r-- 1 root root 4205052 Jun  2 01:00 /lib/modules/6.12.74+deb13+1-amd64/updates/dkms/amdgpu.ko.xz
+    -rw-r--r-- 1 root root   26396 Jun  2 01:00 /lib/modules/6.12.74+deb13+1-amd64/updates/dkms/amdkcl.ko.xz
+    -rw-r--r-- 1 root root   49460 Jun  2 01:00 /lib/modules/6.12.74+deb13+1-amd64/updates/dkms/amdttm.ko.xz
+    -rw-r--r-- 1 root root    5876 Jun  2 01:00 /lib/modules/6.12.74+deb13+1-amd64/updates/dkms/amdxcp.ko.xz
+
+#build and update  VM system ramdisk
+    sudo update-initramfs -ck `uname -r`

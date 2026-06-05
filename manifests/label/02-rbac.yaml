@@ -1,0 +1,34 @@
+# ServiceAccount + cluster-wide RBAC for the LABEL variant's init 2.
+# init 2 writes a node LABEL (object metadata), so it needs the `nodes` resource
+# with get,patch,update — NOT nodes/status. Pod-level identity, shared by all
+# containers in the pod. Not restricted per-node (a node labels itself by
+# NODE_NAME at runtime).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: amdgpu-driver-patch
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: amdgpu-driver-patch
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    # get is required because `kubectl label` issues a GET before the PATCH;
+    # patch/update perform the label write on node metadata.
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: amdgpu-driver-patch
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: amdgpu-driver-patch
+subjects:
+  - kind: ServiceAccount
+    name: amdgpu-driver-patch
+    namespace: kube-system
