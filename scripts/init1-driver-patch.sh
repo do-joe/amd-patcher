@@ -41,6 +41,7 @@ MARKER_DIR="/var/lib/amdgpu-patch"              # host fs, PERSISTS across reboo
 APPLIED="${MARKER_DIR}/applied"
 BOOTID_FILE="${MARKER_DIR}/reboot-boot-id"
 DKMS_DIR="/lib/modules/${EXPECT_KREL}/updates/dkms"
+PEERING_SCRIPT="/var/lib/cloud/scripts/peering.sh"  # host fs; re-adds VPC peering routes lost on reboot
 
 # The 8 modules the official tarball delivers (presence sanity check).
 EXPECT_MODULES=(
@@ -62,6 +63,26 @@ hsh()  { nsenter -t 1 -m -u -i -n -p -- bash -c "$1"; }
 
 # Read the running kernel's boot id from the host (changes on every reboot).
 host_boot_id() { hsh "cat /proc/sys/kernel/random/boot_id 2>/dev/null" | tr -d '[:space:]'; }
+
+# ---------------------------------------------------------------------------
+# Re-add VPC peering routes lost across the reboot. The reboot in Step C drops
+# the dynamically-added peering routes; the node comes back up without them, so
+# we re-run the host's own peering script in the post-reboot phase. Best-effort:
+# a missing script or a non-zero exit is logged loudly but does NOT crash init1
+# — a routing hiccup must not block node labeling or strand the node unpatched.
+# ---------------------------------------------------------------------------
+restore_peering_routes() {
+  if ! hsh "test -x '${PEERING_SCRIPT}'"; then
+    log "WARN: peering script ${PEERING_SCRIPT} not found/executable on host; skipping route restore."
+    return 0
+  fi
+  log "Re-adding VPC peering routes via host ${PEERING_SCRIPT} ..."
+  if hsh "${PEERING_SCRIPT} 2>&1"; then
+    log "Peering routes restored (${PEERING_SCRIPT} exited 0)."
+  else
+    log "WARN: ${PEERING_SCRIPT} exited non-zero; VPC peering routes may be missing. Continuing."
+  fi
+}
 
 # ---------------------------------------------------------------------------
 # Post-reboot verification oracle (no dmesg). Require ALL three:
@@ -137,6 +158,9 @@ log "State: applied=${APPLIED_PRESENT} rebooted=${REBOOTED} (boot_id cur=${CUR_B
 # Step A — success branch: applied, rebooted, and verification passes.
 # ---------------------------------------------------------------------------
 if [ "${REBOOTED}" -eq 1 ]; then
+  # The reboot wiped the node's VPC peering routes; re-add them now that the
+  # node is back up, before anything else in the post-reboot phase.
+  restore_peering_routes
   if verify_installed_and_loaded; then
     log "Patched driver verified after reboot. Exiting 0 (init 2 may run)."
     exit 0

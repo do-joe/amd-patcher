@@ -2,7 +2,10 @@
 # Pod = two run-to-completion init containers + an idle busybox "pause" main.
 #   init 1 "driver-patch"  (PRIVILEGED, hostPID): extract pre-compiled modules +
 #                          sha256 verify + depmod + initramfs + reboot, re-entrant
-#                          reboot-loop; exits 0 only after post-reboot verify.
+#                          reboot-loop; exits 0 only after post-reboot verify. In
+#                          the post-reboot phase it also re-runs the host's
+#                          /var/lib/cloud/scripts/peering.sh (via nsenter) to
+#                          re-add the VPC peering routes the reboot wipes.
 #   init 2 "label-node"    (UNPRIVILEGED): host kubectl + pod SA token labels the
 #                          node amd.com/gpu-driver-patched=true. Runs only if
 #                          init 1 exits 0.
