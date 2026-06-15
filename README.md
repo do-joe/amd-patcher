@@ -271,11 +271,6 @@ that uses the GPU:
 
 ```yaml
 spec:
-  strategy:
-    rollingUpdate:
-      maxUnavailable: 0          # never drop a running pod before its replacement
-                                 # is scheduled (the replacement may sit Pending
-                                 # until a patched node has capacity — that's fine)
   template:
     spec:
       affinity:
@@ -286,15 +281,6 @@ spec:
                   - key: amd.com/gpu-driver-patched   # only patched nodes
                     operator: In
                     values: ["true"]
-      tolerations:
-        - key: amd.com/gpu                    # tolerate the AMD GPU device taint
-          operator: Exists
-          effect: NoSchedule
-      containers:
-        - name: <your-container>
-          resources:
-            limits:
-              amd.com/gpu: 1                  # bind a real GPU via the device plugin
 ```
 
 See [`manifests/label/10-sample-deployment.yaml`](https://github.com/do-joe/amd-patcher/blob/main/manifests/label/10-sample-deployment.yaml)
