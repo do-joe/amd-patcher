@@ -12,11 +12,13 @@ cluster of AMD GPU nodes.
 > batch) at a time at your own pace, in a planned maintenance window.
 > → **[Roll out per node](#reboot-warning)**
 >
-> **2 · Update your GPU workloads to add a node selector.** Every GPU workload
-> must set `nodeSelector: amd.com/gpu-driver-patched: "true"` so pods run **only
-> on nodes whose kernel has already been patched and rebooted.** This is the
-> gating step — without it, pods can land on an unpatched node.
-> → **[Gate your workloads](#gate-workloads)**
+> **2 · Gate your GPU workloads with node affinity.** Every GPU workload must
+> **require** `amd.com/gpu-driver-patched=true` via
+> `requiredDuringSchedulingIgnoredDuringExecution` node affinity, so new pods run
+> **only on nodes whose kernel has already been patched and rebooted** while pods
+> already running are left untouched. This is the gating step — without it, pods
+> can land on an unpatched node.
+> → **[Gate your workloads](#gate-workloads)** · **[Migrate an existing cluster](#migrate-existing)**
 
 ---
 
@@ -243,24 +245,47 @@ patch persists and it is not rebooted again.
    ```
 
 <a id="gate-workloads"></a>
-### 4c. Gate your own GPU workloads with the node selector (required)
+### 4c. Gate your own GPU workloads with node affinity (required)
 
 **This label is the gating mechanism, and it only works if your workloads opt
-into it.** Every GPU workload you intend to run on this cluster **must** carry
-the `amd.com/gpu-driver-patched: "true"` node selector. That is what guarantees a
-pod is scheduled **only onto a node whose kernel driver has already been patched
-and rebooted** — a node without the label has not finished patching, and pods
-that omit the selector may land there and run against the unpatched driver.
+into it.** Every GPU workload you intend to run on this cluster **must** require
+the `amd.com/gpu-driver-patched=true` label via **node affinity**. That is what
+guarantees a pod is scheduled **only onto a node whose kernel driver has already
+been patched and rebooted** — a node without the label has not finished patching,
+and pods that omit the gate may land there and run against the unpatched driver.
+
+Use `requiredDuringSchedulingIgnoredDuringExecution` rather than a plain
+`nodeSelector`. The two are the same scheduling constraint, but the affinity form
+makes the migration‑safe behavior explicit:
+
+- **`IgnoredDuringExecution`** — adding this gate to a Deployment that is **already
+  running on unpatched nodes does not evict those pods.** They keep running; the
+  rule only governs where *new* pods may be placed. This is what lets you roll the
+  gate out across a live cluster before any node is patched.
+- **`required…Scheduling`** — a **new** pod can be placed **only** on a patched
+  node. If none has free capacity it stays `Pending` until one does (expected
+  during the migration window — see [Migrating an existing cluster](#migrate-existing)).
 
 Add this to the pod template of every Deployment / StatefulSet / Job / DaemonSet
 that uses the GPU:
 
 ```yaml
 spec:
+  strategy:
+    rollingUpdate:
+      maxUnavailable: 0          # never drop a running pod before its replacement
+                                 # is scheduled (the replacement may sit Pending
+                                 # until a patched node has capacity — that's fine)
   template:
     spec:
-      nodeSelector:
-        amd.com/gpu-driver-patched: "true"   # only schedule onto patched nodes
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: amd.com/gpu-driver-patched   # only patched nodes
+                    operator: In
+                    values: ["true"]
       tolerations:
         - key: amd.com/gpu                    # tolerate the AMD GPU device taint
           operator: Exists
@@ -276,11 +301,48 @@ See [`manifests/label/10-sample-deployment.yaml`](https://github.com/do-joe/amd-
 for a complete working example.
 
 > **Why this matters:** gating here is *cooperative* — the patcher labels nodes,
-> but it does not by itself stop a workload that omits the selector from being
-> scheduled onto an unpatched node. The node selector on your workloads is the
+> but it does not by itself stop a workload that omits the affinity from being
+> scheduled onto an unpatched node. The node affinity on your workloads is the
 > enforcement step. (For *hard* enforcement that does not rely on each workload
 > opting in, use the [`manifests/nrc/`](https://github.com/do-joe/amd-patcher/tree/main/manifests/nrc)
 > taint‑based variant instead — see [Cooperative gating](#cooperative-gating).)
+
+<a id="migrate-existing"></a>
+### 4d. Migrating an existing cluster, batch by batch
+
+Because both the patcher (opt‑in label) and your workloads (node affinity) are
+gated, you can migrate a **live** cluster onto patched nodes without a fleet‑wide
+reboot and without evicting running pods. The order matters:
+
+1. **Gate your GPU workloads first** with the [4c](#gate-workloads) affinity (and
+   `maxUnavailable: 0`). Pods already running on unpatched nodes keep running
+   (`IgnoredDuringExecution`); only *new* pods now require a patched node.
+2. **Apply the RBAC + DaemonSet** ([4b](#reboot-warning) steps 1–2). Still inert —
+   no node is labeled, so nothing is patched or rebooted.
+3. **Migrate one batch of nodes at a time.** For each node in the batch:
+
+   ```bash
+   # a. cordon + evict workloads (the patcher DaemonSet is left in place)
+   kubectl drain <node> --ignore-daemonsets --delete-emptydir-data
+
+   # b. opt the node in -> patcher schedules onto it, patches, and reboots it
+   kubectl label node <node> amd.com/gpu-driver-patch-enabled=true
+
+   # c. wait until the patch is verified (label appears after the reboot)
+   kubectl get node <node> \
+     -o jsonpath='{.metadata.labels.amd\.com/gpu-driver-patched}'   # -> true
+
+   # d. return the node to service -> gated workloads reschedule onto it
+   kubectl uncordon <node>
+   ```
+
+   Then repeat for the next batch until every GPU node is patched.
+
+> **Pending pods are expected mid‑batch.** Between drain (a) and uncordon (d) a
+> drained GPU pod has no patched node to land on, so it waits `Pending` — the hard
+> gate working as intended during the reboot. For the **first** batch there is no
+> patched capacity yet, so its pods stay `Pending` until step (c)/(d) completes;
+> later batches can also reschedule onto nodes patched in earlier batches.
 
 ---
 
@@ -333,5 +395,6 @@ new kernel‑tagged image.
 | DaemonSet ready | once nodes are opted in, `kubectl -n kube-system get ds amdgpu-driver-patch` → DESIRED == READY (== number of opted‑in nodes) |
 | init 1 logs | kernel gate passes, `sha256 ... OK`, reboot, post‑reboot `Exiting 0` |
 | Node label | `amd.com/gpu-driver-patched=true` on each opted‑in node after its patch |
+| Workload gate is non‑disruptive | adding the 4c node affinity to a Deployment running on unpatched nodes does **not** evict its pods; a **new** pod stays `Pending` until at least one node has `amd.com/gpu-driver-patched=true` |
 | Sample pod | `Running`, bound `amd.com/gpu: 1`, on a patched node |
 | Pool scale‑up | a new node in a pool labeled `amd.com/gpu-driver-patch-enabled=true` auto‑patches, reboots, and gets the `-patched` label; a node without it stays untouched |

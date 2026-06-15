@@ -1,6 +1,10 @@
 # Sample GPU workload — LABEL variant.
 # Schedules ONLY onto nodes the patcher has labeled, AND binds a real GPU.
-#   * nodeSelector amd.com/gpu-driver-patched=true  -> only patched nodes.
+#   * nodeAffinity (required, IgnoredDuringExecution) amd.com/gpu-driver-patched=true
+#       -> a NEW pod is placed only on a patched node; an ALREADY-running pod is
+#       never evicted if its node stops matching. This is the form to copy onto
+#       your own Deployments so adding the gate to a live workload does not
+#       disrupt it (see README "Gate your own GPU workloads").
 #   * tolerations amd.com/gpu                        -> tolerate the device taint.
 #   * resources.limits amd.com/gpu: 1                -> forces scheduling through
 #       the amd-gpu-device-plugin. A Running pod therefore proves the node is
@@ -23,8 +27,17 @@ spec:
       labels:
         app: gpu-sample
     spec:
-      nodeSelector:
-        amd.com/gpu-driver-patched: "true"
+      affinity:
+        nodeAffinity:
+          # required => a new pod schedules ONLY on a patched node.
+          # IgnoredDuringExecution => already-running pods are never evicted,
+          # so adding this to a live Deployment does not disrupt it.
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: amd.com/gpu-driver-patched
+                    operator: In
+                    values: ["true"]
       tolerations:
         - key: amd.com/gpu
           operator: Exists
