@@ -1,4 +1,9 @@
 # DaemonSet: amdgpu-driver-patch  — LABEL variant (no NRC)
+# Opt-in: schedules ONLY on AMD GPU nodes labeled
+#   amd.com/gpu-driver-patch-enabled=true (see nodeSelector below). Applying this
+#   manifest reboots nothing until you label a node; un-labeled nodes are never
+#   patched or rebooted. init 2 still writes amd.com/gpu-driver-patched=true after
+#   a verified patch — that output label is what workloads gate on.
 # Pod = two run-to-completion init containers + an idle busybox "pause" main.
 #   init 1 "driver-patch"  (PRIVILEGED, hostPID): extract pre-compiled modules +
 #                          sha256 verify + depmod + initramfs + reboot, re-entrant
@@ -35,6 +40,15 @@ spec:
       hostPID: true
       nodeSelector:
         doks.digitalocean.com/gpu-brand: amd
+        # opt-in gate: the pod schedules (and patches + reboots) ONLY on AMD GPU
+        # nodes an admin has explicitly labeled. Applying this DaemonSet is inert
+        # until a node is labeled amd.com/gpu-driver-patch-enabled=true.
+        amd.com/gpu-driver-patch-enabled: "true"
+      # UPDATE THIS to the pull secret for the registry where the image lives.
+      # `ghcr-pull` is the short-lived GHCR secret used for test only; when the
+      # image is moved to the customer's registry (e.g. DOCR), point this at that
+      # registry's pull secret — or remove imagePullSecrets entirely if DOKS
+      # provides DOCR pull credentials natively.
       imagePullSecrets:
         - name: ghcr-pull
       tolerations:

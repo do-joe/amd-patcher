@@ -5,10 +5,12 @@ cluster of AMD GPU nodes.
 
 > ## ⚠️ Before you deploy — two must‑dos
 >
-> **1 · This reboots every AMD GPU node.** Applying the DaemonSet patches and
-> **reboots** each AMD GPU node once (every node added later is rebooted too).
-> **Apply to the test cluster only**, in a planned maintenance window.
-> → **[Reboot warning](#reboot-warning)**
+> **1 · Patching is opt‑in per node — applying the manifests reboots nothing.**
+> The DaemonSet schedules **only onto nodes you label**
+> `amd.com/gpu-driver-patch-enabled=true`. Applying it to a live cluster is inert:
+> no node is patched or rebooted until you opt it in. You then patch one node (or
+> batch) at a time at your own pace, in a planned maintenance window.
+> → **[Roll out per node](#reboot-warning)**
 >
 > **2 · Update your GPU workloads to add a node selector.** Every GPU workload
 > must set `nodeSelector: amd.com/gpu-driver-patched: "true"` so pods run **only
@@ -20,8 +22,9 @@ cluster of AMD GPU nodes.
 
 ## 1. What this deploys
 
-A privileged DaemonSet that, on every AMD GPU node, installs the official
-pre‑compiled `amdgpu` kernel modules, rebuilds the initramfs, reboots the node,
+A privileged DaemonSet that, on each AMD GPU node **you opt in** (by labeling it
+`amd.com/gpu-driver-patch-enabled=true`), installs the official pre‑compiled
+`amdgpu` kernel modules, rebuilds the initramfs, reboots the node,
 cryptographically verifies the patched driver loaded, and then labels the node
 `amd.com/gpu-driver-patched=true`. A sample GPU workload uses that label to
 schedule only onto patched nodes.
@@ -30,7 +33,8 @@ schedule only onto patched nodes.
 |------|-------|
 | Container image | `ghcr.io/do-solutions/amdgpu-driver-patch:6.12.74-deb13-1-amd64` (also `:latest`) — **private (internal to the `do-solutions` org); pulling it requires the `ghcr-pull` image pull secret** |
 | Target kernel | `6.12.74+deb13+1-amd64` (the image is kernel‑specific) |
-| Node label written | `amd.com/gpu-driver-patched=true` |
+| Opt‑in label you set (the trigger) | `amd.com/gpu-driver-patch-enabled=true` — the DaemonSet patches **only** nodes carrying this |
+| Node label written (the result) | `amd.com/gpu-driver-patched=true` — written after a verified patch; workloads gate on this |
 | Image pull secret | `ghcr-pull` in the `kube-system` namespace |
 
 ### Repository links
@@ -77,11 +81,13 @@ file, or `kubectl apply -f <url>` directly (this repo is public):
 
 ## 3. How it works
 
-Each AMD GPU node runs one DaemonSet pod made of two run‑to‑completion init
-containers plus an idle `pause` main container:
+Each **opted‑in** AMD GPU node (one labeled
+`amd.com/gpu-driver-patch-enabled=true`) runs one DaemonSet pod made of two
+run‑to‑completion init containers plus an idle `pause` main container. Nodes
+without the opt‑in label get no pod and are never touched:
 
 ```
-Pod on an AMD GPU node
+Pod on an opted‑in AMD GPU node
 ├── init 1  "driver-patch"  (PRIVILEGED, hostPID)  ── patches + reboots
 ├── init 2  "label-node"    (unprivileged)         ── labels the node
 └── main    "pause"                                 ── keeps the pod Running
@@ -116,13 +122,16 @@ should run only on patched nodes set a matching `nodeSelector` (see the sample
 deployment). This is **cooperative gating** — see the
 [note in production considerations](#cooperative-gating).
 
-### New nodes are patched automatically
+### New nodes are NOT patched automatically (opt‑in by design)
 
-Because this is a DaemonSet with a `doks.digitalocean.com/gpu-brand=amd` node
-selector, **any AMD GPU node added to the cluster later is handled automatically**:
+The DaemonSet's `nodeSelector` requires **both**
+`doks.digitalocean.com/gpu-brand=amd` **and**
+`amd.com/gpu-driver-patch-enabled=true`. A new AMD GPU node that joins **without**
+the opt‑in label gets no patch pod and is left untouched — this is what makes it
+safe to apply on a live cluster. Patching a node is a deliberate act:
 
 ```
-New AMD GPU node joins
+You label a node: kubectl label node <node> amd.com/gpu-driver-patch-enabled=true
         │
         ▼
 DaemonSet schedules the patch pod  ──►  init 1 patches + reboots the node
@@ -136,35 +145,40 @@ node gets label amd.com/gpu-driver-patched=true ◄┘
 GPU workloads (nodeSelector) schedule onto it
 ```
 
-You do not need to re‑run anything when the cluster scales up — joining a node is
-enough.
+**Want a whole pool auto‑patched on scale‑up?** Set
+`amd.com/gpu-driver-patch-enabled=true` as a **DOKS node‑pool label** — every node
+that pool creates is born opted‑in and patches itself on join (scoped to the pools
+you choose). Leave the label off a pool to keep its nodes under manual control.
 
 ---
 
-## 4. Deploying to the test cluster
+## 4. Deploying
 
-> Run these against the **test cluster context only.** Confirm with
+> Run these against the intended cluster context. Confirm with
 > `kubectl config current-context` first.
 
 <a id="reboot-warning"></a>
-### 4a. ⚠️ Reboot warning — apply to the test cluster ONLY
+### 4a. How the opt‑in rollout works — no fleet‑wide reboot
 
-**Applying the DaemonSet reboots every AMD GPU node in the cluster.** Each node
-is patched and then rebooted exactly once; thereafter the patch persists and the
-node is not rebooted again. But the initial apply triggers a rolling set of node
-reboots across the GPU pool, and **every newly added GPU node will also be
-rebooted** as it is patched.
+**Applying the RBAC + DaemonSet reboots nothing.** The DaemonSet schedules only
+onto nodes labeled `amd.com/gpu-driver-patch-enabled=true`, and at apply time no
+node carries it — so the manifests sit inert and the cluster is undisturbed. This
+is what makes it safe to apply to an **existing** cluster.
 
-Because of this:
+You then drive the rollout one node (or batch) at a time by adding the opt‑in
+label. Each labeled node is patched and rebooted **exactly once**; thereafter the
+patch persists and it is not rebooted again.
 
-- **Only apply to the test cluster** until a production maintenance window is
-  agreed with the customer.
-- Drain / quiesce any GPU workloads you care about first — the nodes will go
-  `NotReady` during the reboot.
-- Do not apply to a production cluster casually. The reboot is unavoidable: the
-  patched kernel modules only take effect after a reboot.
+- **No big‑bang reboot:** nothing happens until you opt a node in, so you control
+  the blast radius and timing.
+- Before opting a node in, **drain / quiesce GPU workloads on it** — it goes
+  `NotReady` during the single reboot.
+- To pause or stop the rollout, simply leave the remaining nodes unlabeled.
+  Removing the opt‑in label from an already‑patched node is safe: the patch
+  persists on the host and its `amd.com/gpu-driver-patched=true` label stays; it
+  only stops the (idle) pod from scheduling there.
 
-### 4b. Apply
+### 4b. Apply, then opt in nodes one at a time
 
 1. **Pull secret.** It is already present on the test cluster's `kube-system`.
    To recreate it elsewhere, apply the exported `ghcr-pull-secret.yaml` (kept out
@@ -178,8 +192,8 @@ Because of this:
      --docker-email=<email>
    ```
 
-2. **RBAC + DaemonSet** (this is the step that reboots the nodes). Apply the two
-   manifests straight from their raw URLs — no clone required:
+2. **RBAC + DaemonSet** (this reboots nothing — no node is opted in yet). Apply
+   the two manifests straight from their raw URLs — no clone required:
 
    ```bash
    kubectl apply -f https://raw.githubusercontent.com/do-joe/amd-patcher/main/manifests/label/02-rbac.yaml \
@@ -189,21 +203,39 @@ Because of this:
    (Or download them first via the [Download the manifests](#download-the-manifests-no-clone-needed)
    links and `kubectl apply -f ./02-rbac.yaml -f ./03-daemonset.yaml`.)
 
-3. **Watch the patch + reboot cycle:**
+   Confirm it is inert — the DaemonSet should show `DESIRED 0`, and no patch pod
+   should exist yet:
+
+   ```bash
+   kubectl -n kube-system get ds amdgpu-driver-patch     # DESIRED == 0
+   ```
+
+3. **Opt in a node to trigger its patch + reboot.** Pick one AMD GPU node and
+   label it; the DaemonSet immediately schedules a patch pod onto **that node
+   only**:
+
+   ```bash
+   kubectl label node <node> amd.com/gpu-driver-patch-enabled=true
+   ```
+
+4. **Watch that node's patch + reboot cycle:**
 
    ```bash
    kubectl -n kube-system logs -f ds/amdgpu-driver-patch -c driver-patch
-   kubectl get nodes -w        # nodes go NotReady -> Ready as they reboot
+   kubectl get node <node> -w        # goes NotReady -> Ready across the reboot
    ```
 
-4. **Confirm a node is patched and labeled:**
+5. **Confirm the node is patched and labeled, then repeat for the next node:**
 
    ```bash
    kubectl get node <node> \
      -o jsonpath='{.metadata.labels.amd\.com/gpu-driver-patched}'   # -> true
    ```
 
-5. **(Optional) Prove a real GPU binds** with the sample workload:
+   Re‑run step 3 for each additional node (or batch several labels together) at
+   whatever pace your maintenance window allows.
+
+6. **(Optional) Prove a real GPU binds** with the sample workload:
 
    ```bash
    kubectl apply -f https://raw.githubusercontent.com/do-joe/amd-patcher/main/manifests/label/10-sample-deployment.yaml
@@ -295,8 +327,11 @@ new kernel‑tagged image.
 
 | Check | Expected |
 |-------|----------|
-| DaemonSet ready | `kubectl -n kube-system get ds amdgpu-driver-patch` → DESIRED == READY |
+| Inert on apply | before any node is labeled, `kubectl -n kube-system get ds amdgpu-driver-patch` → DESIRED == 0, no patch pod, no reboots |
+| Un‑opted‑in node untouched | a node without `amd.com/gpu-driver-patch-enabled=true` gets no pod and never reboots |
+| Opt‑in triggers patch | after `kubectl label node <node> amd.com/gpu-driver-patch-enabled=true`, a patch pod schedules on that node only |
+| DaemonSet ready | once nodes are opted in, `kubectl -n kube-system get ds amdgpu-driver-patch` → DESIRED == READY (== number of opted‑in nodes) |
 | init 1 logs | kernel gate passes, `sha256 ... OK`, reboot, post‑reboot `Exiting 0` |
-| Node label | `amd.com/gpu-driver-patched=true` on each AMD GPU node |
+| Node label | `amd.com/gpu-driver-patched=true` on each opted‑in node after its patch |
 | Sample pod | `Running`, bound `amd.com/gpu: 1`, on a patched node |
-| Scale‑up | a newly added GPU node auto‑patches, reboots, and gets the label |
+| Pool scale‑up | a new node in a pool labeled `amd.com/gpu-driver-patch-enabled=true` auto‑patches, reboots, and gets the `-patched` label; a node without it stays untouched |
